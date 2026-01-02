@@ -68,10 +68,31 @@ This provides defense-in-depth: the gate blocks obvious threats, rollback catche
 
 ```bash
 # Test rollback with gate disabled (so rollback has something to catch)
-python ttt_input_gradient_monitor.py --demo_high_entropy --disable_gate --chunk_tokens 32
+python run_monitor.py --demo_high_entropy --disable_gate --chunk_tokens 32
 
 # Adjust rollback sensitivity
-python ttt_input_gradient_monitor.py --demo_high_entropy --disable_gate --rollback_abs_canary_delta 0.5
+python run_monitor.py --demo_high_entropy --disable_gate --rollback_abs_canary_delta 0.5
+```
+
+## Project Structure
+
+```
+ttt_ssm_eval/
+├── ttt/                      # Main package
+│   ├── __init__.py           # Package exports
+│   ├── core/
+│   │   ├── model.py          # ToyTTTModel, tokenization
+│   │   ├── gate.py           # Pre-update gate logic
+│   │   └── rollback.py       # Canary drift & rollback
+│   ├── monitors/
+│   │   └── gradient.py       # MonitorEvent, run_monitor()
+│   ├── attacks/
+│   │   └── red_team.py       # Adversarial attack optimization
+│   └── ui/
+│       └── dashboard.py      # FastAPI web dashboard
+├── run_monitor.py            # CLI entry point
+├── examples/                 # Red team analysis and results
+└── assets/                   # Screenshots and docs
 ```
 
 ## Installation
@@ -86,19 +107,19 @@ Requires PyTorch >= 2.0
 
 ```bash
 # Run built-in demo with mixed benign/adversarial text
-python ttt_input_gradient_monitor.py --demo
+python run_monitor.py --demo
 
 # Run high-entropy demo (triggers large updates)
-python ttt_input_gradient_monitor.py --demo_high_entropy
+python run_monitor.py --demo_high_entropy
 
 # Analyze custom text
-python ttt_input_gradient_monitor.py --text "Your text here"
+python run_monitor.py --text "Your text here"
 
 # Analyze from file
-python ttt_input_gradient_monitor.py --file input.txt
+python run_monitor.py --file input.txt
 
 # Read from stdin
-cat document.txt | python ttt_input_gradient_monitor.py --stdin
+cat document.txt | python run_monitor.py --stdin
 ```
 
 ### Options
@@ -138,10 +159,10 @@ The TTT Sentry Dashboard provides a web-based interface for interactive monitori
 
 ```bash
 # Start the dashboard
-python ttt_dashboard.py
+python -m ttt.ui.dashboard
 
 # Or with uvicorn for auto-reload during development
-uvicorn ttt_dashboard:app --reload --port 6677
+uvicorn ttt.ui.dashboard:app --reload --port 6677
 ```
 
 Then open http://127.0.0.1:6677 in your browser.
@@ -180,7 +201,7 @@ The repo includes an adversarial red team script that attempts to generate "Sile
 
 ```bash
 # CLI
-python red_team_attack.py
+python -m ttt.attacks.red_team
 
 # Or from the dashboard UI
 # Click the "⚔️ Red Team" button
