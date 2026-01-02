@@ -1,10 +1,14 @@
-# TTT Input Gradient Monitor
+# TTT/SSM Eval
 
-A toy implementation for exploring test-time training (TTT) dynamics and input monitoring.
+**Toy demo evaluation for Test-Time Training (TTT) in State Space Models (SSM)**
+
+A sandbox for exploring input gradient dynamics and safety mechanisms in TTT-style architectures.
 
 ## Overview
 
-Test-time training is an emerging paradigm where model weights are updated during inference rather than remaining frozen. Instead of storing context in a fixed-size token window, TTT approaches compress information into the model's weights themselves—theoretically allowing unbounded context limited only by the expressiveness of the learned representations.
+Test-time training (TTT) is an emerging paradigm where model weights update during inference rather than remaining frozen. Combined with state space models (SSM), this approach offers a potential alternative to traditional transformer context windows: instead of storing context as tokens in a fixed-size window, TTT/SSM architectures compress information directly into learned neural network weights at inference time.
+
+This theoretically allows unbounded context limited only by the expressiveness of the weight-based memory—not by a token limit. The model "learns" the context into its parameters as it processes input, rather than attending over a growing sequence.
 
 This project provides a sandbox for understanding the "write pressure" that inputs exert on TTT-style adapters:
 
@@ -103,3 +107,13 @@ Each chunk reports:
 ## Limitations
 
 This is an educational sandbox, not a production guardrail. The toy model (embedding + GRU + adapter) is intentionally minimal to make gradient dynamics interpretable.
+
+## Why This Matters
+
+Traditional transformers scale context by extending the attention window, which is O(n²) in compute and memory. TTT/SSM architectures propose a fundamentally different approach: compress context into weight updates, making "context length" a function of model expressiveness rather than sequence length.
+
+The safety question becomes: if the model learns from every input at inference time, how do you prevent it from learning things it shouldn't? This repo explores that question with gradient-based monitoring and pre-update gates.
+
+## Keywords
+
+`test-time-training` `TTT` `state-space-models` `SSM` `mamba` `context-compression` `weight-based-memory` `inference-time-learning` `gradient-monitoring` `input-safety`
