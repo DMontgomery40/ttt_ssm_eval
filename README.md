@@ -4,7 +4,7 @@
 
 A sandbox for exploring input gradient dynamics and safety mechanisms in TTT-style architectures.
 
-[![TTT Sentry Dashboard](./dashboard_screenshot.png)](./dashboard_screenshot.png)
+[![TTT Sentry Dashboard](./assets/dashboard_screenshot.png)](./assets/dashboard_screenshot.png)
 *Click to expand - TTT Sentry Dashboard showing gradient monitoring, gate decisions, and canary drift detection*
 
 ## Overview
@@ -167,7 +167,7 @@ Vertical dashed lines on the chart mark blocked and rollback events for easy cor
 
 ## Red Team Attack
 
-[![Red Team Attack](./red_team_screenshot.png)](./red_team_screenshot.png)
+[![Red Team Attack](./assets/red_team_screenshot.png)](./assets/red_team_screenshot.png)
 *Click to expand - Adversarial optimization trajectory and attack validation*
 
 The repo includes an adversarial red team script that attempts to generate "Silent Killer" payloads - inputs that:
