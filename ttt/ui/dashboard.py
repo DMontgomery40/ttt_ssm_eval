@@ -15,20 +15,15 @@ from dataclasses import asdict
 import sys
 import json
 
-# Attempt to import the monitor logic
-try:
-    import ttt_input_gradient_monitor as monitor
-except ImportError:
-    print("❌ Error: Could not import 'ttt_input_gradient_monitor.py'.")
-    print("   Please ensure it is in the same directory as this script.")
-    sys.exit(1)
+# Import from the ttt package
+from ..monitors.gradient import run_monitor
+from ..attacks import red_team as red_team_attack
 
-# Import red team attack module
-try:
-    import red_team_attack
-except ImportError:
-    print("⚠️ Warning: Could not import 'red_team_attack.py'. Red team features disabled.")
-    red_team_attack = None
+# Create a namespace object to match old import style
+class _MonitorNamespace:
+    run_monitor = staticmethod(run_monitor)
+
+monitor = _MonitorNamespace()
 
 # --- Configuration ---
 PORT = 6677  # Uncommon port

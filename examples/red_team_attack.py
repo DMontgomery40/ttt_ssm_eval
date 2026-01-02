@@ -1,1 +1,1 @@
-../red_team_attack.py
+../ttt/attacks/red_team.py
