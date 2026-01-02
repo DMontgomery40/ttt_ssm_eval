@@ -18,6 +18,8 @@ from ..core.model import (
     ids_from_tokens,
     DEFAULT_CANARY_TEXT,
 )
+from ..core.backbone import BackboneType
+from ..core.objective import ObjectiveType
 from ..core.rollback import compute_canary_loss
 from ..monitors.gradient import run_monitor
 
@@ -28,6 +30,10 @@ def run_attack(
     steps: int = 500,
     lr: float = 0.1,
     return_trajectory: bool = False,
+    # Backbone and objective support
+    backbone: BackboneType = "gru",
+    objective: ObjectiveType = "ar",
+    device: str = "cpu",
 ):
     """
     Run adversarial optimization to generate a "Silent Killer" payload.
@@ -38,11 +44,11 @@ def run_attack(
     print(f"⚔️  Initializing Red Team Attack...")
     print(f"    Target: Canary Stability")
     print(f"    Seed: '{seed_text}'")
+    print(f"    Backbone: {backbone.upper()} | Objective: {objective.upper()}")
 
     # 1. Setup Target Model
-    device = "cpu"
     vocab_size = 8192
-    model = ToyTTTModel(vocab_size=vocab_size).to(device)
+    model = ToyTTTModel(vocab_size=vocab_size, backbone=backbone).to(device)
 
     # Freeze most of model, but keep adapter grad-enabled for gradient computation
     for p in model.parameters():
@@ -89,7 +95,7 @@ def run_attack(
 
         # B. Simulate TTT Update (The "Look Ahead")
         # 1. Forward pass with current adversarial input
-        h, _ = model.rnn(embeds)
+        h = model.backbone(embeds)  # Use backbone abstraction (GRU or SSM)
         h = model.ln(h)
         h_adapter = h + model.adapter(h)
         logits = model.head(h_adapter)
@@ -151,9 +157,13 @@ def run_attack(
     # Run through the actual monitor with gate + rollback enabled
     events = run_monitor(
         final_payload,
+        device=device,
         enable_gate=True,
         enable_rollback=True,
         chunk_tokens=len(final_ids) + 10,  # Single chunk
+        # Pass through backbone/objective for validation
+        backbone=backbone,
+        objective=objective,
     )
 
     if events:

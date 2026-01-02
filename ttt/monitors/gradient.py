@@ -5,6 +5,10 @@ Tracks how "hard" input tries to write into the TTT adapter:
 - Adapter gradient norm (write pressure)
 - Adapter update norm (actual write magnitude)
 - Per-token influence (gradient norm w.r.t. embedding vectors)
+- Compression ratio (Kolmogorov complexity proxy)
+- Gradient alignment with canary (directional damage signal)
+
+Supports multiple backbone architectures (GRU, SSM) and TTT objectives (AR, MLM).
 """
 
 from __future__ import annotations
@@ -22,8 +26,16 @@ from ..core.model import (
     ids_from_tokens,
     DEFAULT_CANARY_TEXT,
 )
+from ..core.backbone import BackboneType
+from ..core.objective import ObjectiveType, compute_objective_loss
 from ..core.gate import check_gate
 from ..core.rollback import compute_canary_loss, robust_zscore
+from .signals import (
+    compute_compression_ratio,
+    compute_canary_gradient,
+    compute_gradient_alignment,
+    get_canary_grad_norm,
+)
 
 
 @dataclass
@@ -56,6 +68,15 @@ class MonitorEvent:
     canary_loss_after: Optional[float]
     canary_delta: Optional[float]
     canary_delta_z: Optional[float]
+    # Backbone/objective metadata
+    backbone: str = "gru"
+    objective: str = "ar"
+    # Compression-based signal (Kolmogorov proxy)
+    compression_ratio: Optional[float] = None
+    # Canary gradient alignment signals
+    canary_grad_norm: Optional[float] = None
+    grad_canary_cos: Optional[float] = None  # Cosine similarity
+    grad_canary_dot: Optional[float] = None  # Dot product
 
 
 def run_monitor(
@@ -84,16 +105,35 @@ def run_monitor(
     rollback_z_threshold: float = 6.0,
     rollback_abs_canary_delta: float = 1.0,
     canary_text: str = DEFAULT_CANARY_TEXT,
+    # Backbone and objective selection
+    backbone: BackboneType = "gru",
+    objective: ObjectiveType = "ar",
+    mlm_prob: float = 0.15,
+    # Canary gradient alignment monitoring
+    enable_canary_grad: bool = True,
+    canary_grad_every: int = 1,
 ) -> List[MonitorEvent]:
     """
     Run TTT monitoring on input text.
+
+    Args:
+        text: Input text to analyze
+        backbone: Architecture type ("gru" or "ssm")
+        objective: TTT loss function ("ar" or "mlm")
+        mlm_prob: Mask probability for MLM objective
+        enable_canary_grad: Compute canary gradient alignment
+        canary_grad_every: Recompute canary gradient every N chunks
 
     Returns a list of MonitorEvent objects, one per chunk.
     """
     torch.manual_seed(seed)
     random.seed(seed)
 
-    model = ToyTTTModel(vocab_size=vocab_size, d_model=d_model).to(device)
+    model = ToyTTTModel(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        backbone=backbone,
+    ).to(device)
 
     # Freeze everything except the adapter
     for p in model.parameters():
@@ -107,18 +147,23 @@ def run_monitor(
 
     # Canary setup for rollback drift detection
     canary_input_ids: Optional[torch.Tensor] = None
-    if enable_rollback:
+    if enable_rollback or enable_canary_grad:
         canary_tokens = tokenize(canary_text)
         canary_ids = ids_from_tokens(canary_tokens, vocab_size)
         if len(canary_ids) < 8:
             canary_ids = (canary_ids * 8)[:8] if canary_ids else [0] * 8
         canary_input_ids = torch.tensor([canary_ids], dtype=torch.long, device=device)
 
+    # Canary gradient for directional alignment (computed periodically)
+    cached_canary_grad: Optional[torch.Tensor] = None
+    cached_canary_grad_norm: float = 0.0
+
     grad_history: List[float] = []
     update_history: List[float] = []
     canary_delta_history: List[float] = []
 
     events: List[MonitorEvent] = []
+    chunk_count = 0
 
     for start in range(0, len(ids), chunk_tokens):
         chunk_ids = ids[start : start + chunk_tokens]
@@ -129,6 +174,9 @@ def run_monitor(
         input_ids = torch.tensor([chunk_ids], dtype=torch.long, device=device)
         chunk_text = " ".join(chunk_toks)
 
+        # Compute compression ratio (Kolmogorov proxy)
+        compression_ratio = compute_compression_ratio(chunk_text)
+
         # TTT update loop (usually 1 step per chunk in this toy)
         update_skipped = False
         rollback_triggered = False
@@ -136,11 +184,26 @@ def run_monitor(
         attempted_update_norm = 0.0
         update_norm = 0.0
 
+        # Canary gradient alignment signals
+        grad_canary_cos: Optional[float] = None
+        grad_canary_dot: Optional[float] = None
+
         # Canary measurements
         canary_loss_before: Optional[float] = None
         canary_loss_after: Optional[float] = None
         canary_delta: Optional[float] = None
         canary_delta_z: Optional[float] = None
+
+        # Update cached canary gradient periodically
+        if (
+            enable_canary_grad
+            and canary_input_ids is not None
+            and (chunk_count % max(1, canary_grad_every) == 0)
+        ):
+            cached_canary_grad = compute_canary_gradient(
+                model, canary_input_ids, vocab_size
+            )
+            cached_canary_grad_norm = get_canary_grad_norm(cached_canary_grad)
 
         # Measure canary before any updates in this chunk
         if enable_rollback and canary_input_ids is not None:
@@ -149,20 +212,28 @@ def run_monitor(
         for _ in range(ttt_steps_per_chunk):
             opt.zero_grad(set_to_none=True)
 
-            logits, emb = model(input_ids, return_emb=True)
+            # Compute loss using objective-aware function
+            loss, logits, emb = compute_objective_loss(
+                model,
+                input_ids,
+                objective=objective,
+                vocab_size=vocab_size,
+                mlm_prob=mlm_prob,
+                mask_token_id=model.mask_token_id,
+                return_emb=True,
+            )
             assert emb is not None
 
-            # Next-token prediction on the same chunk
-            logits2 = logits[:, :-1, :].contiguous()
-            labels = input_ids[:, 1:].contiguous()
-
-            loss = F.cross_entropy(
-                logits2.view(-1, vocab_size),
-                labels.view(-1),
-            )
             loss.backward()
 
             grad_norm = float(model.adapter.weight.grad.detach().norm().item())
+
+            # Compute gradient alignment with canary
+            if enable_canary_grad and cached_canary_grad is not None:
+                chunk_grad = model.adapter.weight.grad.detach().clone()
+                grad_canary_cos, grad_canary_dot = compute_gradient_alignment(
+                    chunk_grad, cached_canary_grad
+                )
 
             # Per-token influence proxy
             tok_infl = emb.grad.detach().norm(dim=-1).squeeze(0)  # (T,)
@@ -297,10 +368,18 @@ def run_monitor(
                 canary_loss_after=canary_loss_after,
                 canary_delta=canary_delta,
                 canary_delta_z=canary_delta_z,
+                # New fields
+                backbone=backbone,
+                objective=objective,
+                compression_ratio=compression_ratio,
+                canary_grad_norm=cached_canary_grad_norm if enable_canary_grad else None,
+                grad_canary_cos=grad_canary_cos,
+                grad_canary_dot=grad_canary_dot,
             )
         )
 
         grad_history.append(grad_norm)
         update_history.append(attempted_update_norm)
+        chunk_count += 1
 
     return events

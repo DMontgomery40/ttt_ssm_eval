@@ -234,6 +234,27 @@ HTML_CONTENT = """
             <div class="card">
                 <h3 style="margin-bottom: 10px;">Parameters</h3>
                 <div class="param-grid">
+                    <label>Backbone:</label>
+                    <select id="backbone" style="background: #090c10; border: 1px solid var(--border); color: var(--text-main); border-radius: 4px; padding: 4px;">
+                        <option value="gru">GRU (Default)</option>
+                        <option value="ssm">SSM (Selective State Space)</option>
+                    </select>
+
+                    <label>Objective:</label>
+                    <select id="objective" onchange="toggleMlmProb()" style="background: #090c10; border: 1px solid var(--border); color: var(--text-main); border-radius: 4px; padding: 4px;">
+                        <option value="ar">AR (Next-Token)</option>
+                        <option value="mlm">MLM (Masked)</option>
+                    </select>
+
+                    <label id="mlmProbLabel" style="display: none;">MLM Mask Prob: <span id="mlmProbVal">0.15</span></label>
+                    <input type="range" id="mlmProb" min="0.05" max="0.30" step="0.01" value="0.15" oninput="document.getElementById('mlmProbVal').innerText=this.value" style="display: none;">
+
+                    <label>Device:</label>
+                    <select id="device" style="background: #090c10; border: 1px solid var(--border); color: var(--text-main); border-radius: 4px; padding: 4px;">
+                        <option value="cpu">CPU</option>
+                        <option value="mps">MPS (Apple GPU)</option>
+                    </select>
+
                     <label>Chunk Size: <span id="chunkVal">32</span></label>
                     <input type="range" id="chunkTokens" min="16" max="256" value="32" oninput="document.getElementById('chunkVal').innerText=this.value">
 
@@ -245,12 +266,18 @@ HTML_CONTENT = """
 
                     <label>Rollback Delta: <span id="rollbackVal">1.0</span></label>
                     <input type="range" id="rollbackDelta" min="0.01" max="2" step="0.01" value="1.0" oninput="document.getElementById('rollbackVal').innerText=this.value">
+
+                    <label style="display: flex; align-items: center; gap: 8px;">
+                        <input type="checkbox" id="enableCanaryGrad" checked style="accent-color: var(--accent-blue);">
+                        Canary Gradient Alignment
+                    </label>
                 </div>
                 <style>
                     .param-grid { display: grid; gap: 8px; font-size: 0.85rem; }
                     .param-grid label { color: var(--text-muted); display: flex; justify-content: space-between; }
                     .param-grid label span { color: var(--accent-blue); font-weight: bold; }
                     .param-grid input[type="range"] { width: 100%; accent-color: var(--accent-blue); }
+                    .param-grid select { width: 100%; }
                 </style>
             </div>
 
@@ -322,6 +349,13 @@ Now return to normal talk about cameras, home automation, and benign code. I set
 
         function loadHighEntropy() {
             document.getElementById('inputText').value = HIGH_ENTROPY_TEXT;
+        }
+
+        function toggleMlmProb() {
+            const objective = document.getElementById('objective').value;
+            const show = objective === 'mlm';
+            document.getElementById('mlmProbLabel').style.display = show ? 'flex' : 'none';
+            document.getElementById('mlmProb').style.display = show ? 'block' : 'none';
         }
 
         function exportJSON() {
@@ -509,6 +543,12 @@ Now return to normal talk about cameras, home automation, and benign code. I set
                 min_entropy_threshold: parseFloat(document.getElementById('minEntropy').value),
                 ood_loss_threshold: parseFloat(document.getElementById('oodLoss').value),
                 rollback_abs_canary_delta: parseFloat(document.getElementById('rollbackDelta').value),
+                // New backbone/objective params
+                backbone: document.getElementById('backbone').value,
+                objective: document.getElementById('objective').value,
+                mlm_prob: parseFloat(document.getElementById('mlmProb').value),
+                device: document.getElementById('device').value,
+                enable_canary_grad: document.getElementById('enableCanaryGrad').checked,
             };
 
             // UI Loading State
@@ -578,18 +618,37 @@ Now return to normal talk about cameras, home automation, and benign code. I set
                     canaryHtml = `<span style="color:${deltaColor}">Canary Δ: ${e.canary_delta.toFixed(3)}</span>`;
                 }
 
+                // Compression ratio (Kolmogorov proxy)
+                let crHtml = '';
+                if (e.compression_ratio !== null && e.compression_ratio !== undefined) {
+                    crHtml = `<div class="metric">CR: <span>${e.compression_ratio.toFixed(2)}</span></div>`;
+                }
+
+                // Canary gradient alignment (cosine similarity)
+                let cosHtml = '';
+                if (e.grad_canary_cos !== null && e.grad_canary_cos !== undefined) {
+                    // Color: green=aligned (positive), red=opposed (negative), grey=orthogonal
+                    const cosColor = e.grad_canary_cos > 0.3 ? 'var(--accent-green)' :
+                                     (e.grad_canary_cos < -0.3 ? 'var(--accent-red)' : 'var(--text-muted)');
+                    cosHtml = `<span style="color:${cosColor}">cos: ${e.grad_canary_cos.toFixed(2)}</span>`;
+                }
+
+                // Backbone/objective badge
+                const configBadge = `<span style="font-size:0.7rem;color:var(--text-muted)">${e.backbone.toUpperCase()}/${e.objective.toUpperCase()}</span>`;
+
                 const el = document.createElement('div');
                 el.className = `event-card ${statusClass}`;
                 el.innerHTML = `
-                    <div class="chunk-id">#${e.chunk_index.toString().padStart(3, '0')}</div>
+                    <div class="chunk-id">#${e.chunk_index.toString().padStart(3, '0')}<br>${configBadge}</div>
                     <div>
                         <div class="chunk-preview">"${e.chunk_preview}"</div>
                         <div class="metrics-row">
                             <div class="metric">Grad: <span>${e.grad_norm.toFixed(2)}</span></div>
                             <div class="metric">Loss: <span>${e.loss.toFixed(2)}</span></div>
                             <div class="metric">Entropy: <span>${e.token_entropy.toFixed(2)}</span></div>
-                            <div class="metric">Diversity: <span>${(e.token_diversity * 100).toFixed(0)}%</span></div>
+                            ${crHtml}
                             ${canaryHtml}
+                            ${cosHtml}
                         </div>
                         <div class="metrics-row">
                             ${reasonHtml}
@@ -617,6 +676,8 @@ Now return to normal talk about cameras, home automation, and benign code. I set
             const gradNorms = events.map(e => e.grad_norm);
             const losses = events.map(e => e.loss);
             const canaryDeltas = events.map(e => e.canary_delta !== null ? e.canary_delta * 10 : null); // Scale for visibility
+            const compressionRatios = events.map(e => e.compression_ratio !== null ? e.compression_ratio : null);
+            const cosineSims = events.map(e => e.grad_canary_cos !== null ? e.grad_canary_cos : null);
 
             // Highlight blocked chunks in chart
             const pointColors = events.map(e => {
@@ -645,46 +706,79 @@ Now return to normal talk about cameras, home automation, and benign code. I set
             // For single data points, use scatter-like display
             const showLines = events.length > 1;
 
+            // Check if we have canary grad data
+            const hasCanaryGrad = events.some(e => e.grad_canary_cos !== null);
+
+            // Build datasets
+            const datasets = [
+                {
+                    label: 'Write Pressure (Grad Norm)',
+                    data: gradNorms,
+                    borderColor: '#58a6ff',
+                    backgroundColor: 'rgba(88, 166, 255, 0.1)',
+                    pointBackgroundColor: pointColors,
+                    pointRadius: 6,
+                    pointHoverRadius: 8,
+                    tension: 0.3,
+                    yAxisID: 'y',
+                    showLine: showLines,
+                },
+                {
+                    label: 'Prediction Loss',
+                    data: losses,
+                    borderColor: '#8b949e',
+                    borderDash: [5, 5],
+                    pointRadius: 5,
+                    pointBackgroundColor: '#8b949e',
+                    tension: 0.3,
+                    yAxisID: 'y1',
+                    showLine: showLines,
+                },
+                {
+                    label: 'Canary Δ (×10)',
+                    data: canaryDeltas,
+                    borderColor: '#f78166',
+                    borderWidth: 1,
+                    pointRadius: 5,
+                    pointBackgroundColor: '#f78166',
+                    tension: 0.3,
+                    yAxisID: 'y',
+                    showLine: showLines,
+                },
+                {
+                    label: 'Compression Ratio',
+                    data: compressionRatios,
+                    borderColor: '#a371f7',
+                    borderWidth: 1,
+                    borderDash: [3, 3],
+                    pointRadius: 3,
+                    pointBackgroundColor: '#a371f7',
+                    tension: 0.3,
+                    yAxisID: 'y',
+                    showLine: showLines,
+                },
+            ];
+
+            // Add cosine similarity if available
+            if (hasCanaryGrad) {
+                datasets.push({
+                    label: 'Canary Cos Sim',
+                    data: cosineSims,
+                    borderColor: '#7ee787',
+                    borderWidth: 1,
+                    pointRadius: 3,
+                    pointBackgroundColor: cosineSims.map(c => c !== null ? (c > 0 ? '#7ee787' : '#ff7b72') : '#8b949e'),
+                    tension: 0.3,
+                    yAxisID: 'y',
+                    showLine: showLines,
+                });
+            }
+
             chartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: labels,
-                    datasets: [
-                        {
-                            label: 'Write Pressure (Grad Norm)',
-                            data: gradNorms,
-                            borderColor: '#58a6ff',
-                            backgroundColor: 'rgba(88, 166, 255, 0.1)',
-                            pointBackgroundColor: pointColors,
-                            pointRadius: 6,
-                            pointHoverRadius: 8,
-                            tension: 0.3,
-                            yAxisID: 'y',
-                            showLine: showLines,
-                        },
-                        {
-                            label: 'Prediction Loss',
-                            data: losses,
-                            borderColor: '#8b949e',
-                            borderDash: [5, 5],
-                            pointRadius: 5,
-                            pointBackgroundColor: '#8b949e',
-                            tension: 0.3,
-                            yAxisID: 'y1',
-                            showLine: showLines,
-                        },
-                        {
-                            label: 'Canary Δ (×10)',
-                            data: canaryDeltas,
-                            borderColor: '#f78166',
-                            borderWidth: 1,
-                            pointRadius: 5,
-                            pointBackgroundColor: '#f78166',
-                            tension: 0.3,
-                            yAxisID: 'y',
-                            showLine: showLines,
-                        }
-                    ]
+                    datasets: datasets
                 },
                 options: {
                     responsive: true,
@@ -737,6 +831,13 @@ class SimulationRequest(BaseModel):
     ood_loss_threshold: float = 8.0
     ood_grad_threshold: float = 2.0
     rollback_abs_canary_delta: float = 1.0
+    # New backbone/objective params
+    backbone: str = "gru"
+    objective: str = "ar"
+    mlm_prob: float = 0.15
+    enable_canary_grad: bool = True
+    canary_grad_every: int = 1
+    device: str = "cpu"
 
 @app.get("/")
 def serve_ui():
@@ -748,6 +849,7 @@ def analyze(req: SimulationRequest):
     try:
         events = monitor.run_monitor(
             text=req.text,
+            device=req.device,
             seed=req.seed,
             chunk_tokens=req.chunk_tokens,
             lr=req.lr,
@@ -758,6 +860,12 @@ def analyze(req: SimulationRequest):
             ood_loss_threshold=req.ood_loss_threshold,
             ood_grad_threshold=req.ood_grad_threshold,
             rollback_abs_canary_delta=req.rollback_abs_canary_delta,
+            # New backbone/objective params
+            backbone=req.backbone,
+            objective=req.objective,
+            mlm_prob=req.mlm_prob,
+            enable_canary_grad=req.enable_canary_grad,
+            canary_grad_every=req.canary_grad_every,
         )
         # Convert dataclasses to dicts for JSON serialization
         return [asdict(e) for e in events]

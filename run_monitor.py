@@ -49,6 +49,12 @@ def print_report(events: List[MonitorEvent], *, max_events: int = 9999) -> None:
     flagged = sum(1 for e in events if e.flagged)
     blocked = sum(1 for e in events if e.update_skipped)
     rolled_back = sum(1 for e in events if e.rollback_triggered)
+
+    # Get backbone/objective from first event
+    backbone = events[0].backbone if events else "gru"
+    objective = events[0].objective if events else "ar"
+
+    print(f"Backbone: {backbone.upper()}  |  Objective: {objective.upper()}")
     print(
         f"Total chunks: {total}  |  Flagged: {flagged}  |  Blocked: {blocked}  |  Rollbacks: {rolled_back}"
     )
@@ -69,6 +75,13 @@ def print_report(events: List[MonitorEvent], *, max_events: int = 9999) -> None:
             f"try={e.attempted_update_norm:.3f}  grad_z={format_float(e.grad_z)}  "
             f"upd_z={format_float(e.update_z)}  {flag}  {reasons}"
         )
+        # New signals line
+        cr_str = format_float(e.compression_ratio)
+        cos_str = format_float(e.grad_canary_cos)
+        dot_str = format_float(e.grad_canary_dot)
+        canary_g_str = format_float(e.canary_grad_norm)
+        print(f"  cr={cr_str}  canary_g={canary_g_str}  cos={cos_str}  dot={dot_str}")
+
         print(f"  gate: {gate}  entropy={e.token_entropy:.2f}  diversity={e.token_diversity:.2f}")
         if e.gate_reasons:
             print(f"  gate_reasons: {', '.join(e.gate_reasons)}")
@@ -180,6 +193,41 @@ def main() -> None:
         help="Canary text for drift probe",
     )
 
+    # Backbone and objective selection
+    p.add_argument(
+        "--backbone",
+        type=str,
+        choices=["gru", "ssm"],
+        default="gru",
+        help="Backbone architecture: gru (default) or ssm",
+    )
+    p.add_argument(
+        "--objective",
+        type=str,
+        choices=["ar", "mlm"],
+        default="ar",
+        help="TTT objective: ar (next-token, default) or mlm (masked)",
+    )
+    p.add_argument(
+        "--mlm_prob",
+        type=float,
+        default=0.15,
+        help="MLM mask probability (only used with --objective mlm)",
+    )
+
+    # Canary gradient alignment
+    p.add_argument(
+        "--disable_canary_grad",
+        action="store_true",
+        help="Disable canary gradient alignment (faster)",
+    )
+    p.add_argument(
+        "--canary_grad_every",
+        type=int,
+        default=1,
+        help="Recompute canary gradient every N chunks (default: 1)",
+    )
+
     p.add_argument(
         "--write_json", action="store_true", help="Write monitor_report.json"
     )
@@ -206,6 +254,7 @@ def main() -> None:
     # Handle gate enable/disable
     gate_enabled = args.enable_gate and not args.disable_gate
     rollback_enabled = not args.disable_rollback
+    canary_grad_enabled = not args.disable_canary_grad
 
     events = run_monitor(
         text,
@@ -228,6 +277,12 @@ def main() -> None:
         rollback_z_threshold=args.rollback_z_threshold,
         rollback_abs_canary_delta=args.rollback_abs_canary_delta,
         canary_text=args.canary_text,
+        # New parameters
+        backbone=args.backbone,
+        objective=args.objective,
+        mlm_prob=args.mlm_prob,
+        enable_canary_grad=canary_grad_enabled,
+        canary_grad_every=args.canary_grad_every,
     )
 
     print_report(events)

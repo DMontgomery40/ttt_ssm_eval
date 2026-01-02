@@ -3,6 +3,9 @@ ToyTTTModel and tokenization utilities.
 
 The model is a tiny language-model-ish network with an adapter layer
 that updates during test-time training.
+
+Supports pluggable backbone architectures (GRU, SSM) to study how
+different recurrent structures affect gradient dynamics.
 """
 
 from __future__ import annotations
@@ -13,6 +16,8 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+
+from .backbone import BackboneType, create_backbone
 
 
 # Canary text for rollback drift detection
@@ -46,23 +51,36 @@ def ids_from_tokens(tokens: List[str], vocab_size: int) -> List[int]:
 class ToyTTTModel(nn.Module):
     """
     A tiny language-model-ish network:
-    - Embedding -> GRU -> LayerNorm -> (Base + Adapter) -> vocab head
+    - Embedding -> Backbone -> LayerNorm -> (Base + Adapter) -> vocab head
     - Only adapter is updated during TTT steps.
+
+    Backbone options:
+    - "gru": Standard GRU (default, nonlinear gating)
+    - "ssm": Diagonal Selective SSM (linear recurrence + input gate)
     """
 
-    def __init__(self, vocab_size: int = 8192, d_model: int = 64) -> None:
+    def __init__(
+        self,
+        vocab_size: int = 8192,
+        d_model: int = 64,
+        backbone: BackboneType = "gru",
+    ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
         self.d_model = d_model
+        self.backbone_type = backbone
 
         self.embed = nn.Embedding(vocab_size, d_model)
-        self.rnn = nn.GRU(d_model, d_model, batch_first=True)
+        self.backbone = create_backbone(backbone, d_model)
         self.ln = nn.LayerNorm(d_model)
 
         # This is the "memory module" that updates at test time
         self.adapter = nn.Linear(d_model, d_model, bias=False)
 
         self.head = nn.Linear(d_model, vocab_size)
+
+        # Reserve last token ID for [MASK] in MLM objective
+        self.mask_token_id = vocab_size - 1
 
     def forward(
         self, input_ids: torch.Tensor, return_emb: bool = False
@@ -74,7 +92,7 @@ class ToyTTTModel(nn.Module):
         if return_emb:
             x = x.detach().requires_grad_(True)
 
-        h, _ = self.rnn(x)
+        h = self.backbone(x)  # Pluggable backbone (GRU or SSM)
         h = self.ln(h)
 
         h2 = h + self.adapter(h)  # adapter writes "context into weights"

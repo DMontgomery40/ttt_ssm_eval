@@ -13,24 +13,76 @@ Test-time training (TTT) is an emerging paradigm where model weights update duri
 
 This theoretically allows unbounded context limited only by the expressiveness of the weight-based memory—not by a token limit. The model "learns" the context into its parameters as it processes input, rather than attending over a growing sequence.
 
-This project provides a sandbox for understanding the "write pressure" that inputs exert on TTT-style adapters:
+This project provides a sandbox for understanding the "write pressure" that inputs exert on TTT-style adapters, with **pluggable backbone architectures** (GRU, SSM) and **TTT objectives** (AR, MLM) to study how different designs affect gradient dynamics:
 
 - **Gradient norm monitoring**: How hard is the input trying to update the adapter?
 - **Update norm tracking**: How much do the weights actually change?
 - **Per-token influence**: Which tokens contribute most to adapter updates?
 - **Anomaly detection**: Flag inputs with unusually high write pressure using robust z-scores
 - **Pre-update gate**: Block dangerous updates before they write into adapter weights
+- **Directional monitoring**: Canary gradient alignment catches harmful update directions
+- **Compression analysis**: Kolmogorov complexity proxy via zlib compression ratio
 
 ## Concept
 
-A small "memory module" (adapter layer) is the only component updated at test time. Each chunk of input triggers a TTT update step using next-token prediction loss. The monitor tracks:
+A small "memory module" (adapter layer) is the only component updated at test time. Each chunk of input triggers a TTT update step. The monitor tracks:
 
 1. Adapter gradient norms (write pressure)
 2. Actual weight update magnitudes
 3. Per-token influence via embedding gradients
 4. Statistical anomalies relative to recent history
+5. Compression ratio (Kolmogorov complexity proxy)
+6. Canary gradient alignment (directional damage signal)
 
-High-entropy or adversarial inputs often produce larger gradient norms, making this useful for studying input characteristics that drive aggressive weight updates.
+The monitoring is **backbone-agnostic**: the same signals work whether the recurrent layer is a GRU, SSM, or something else entirely. This makes it useful for evaluating architectures that don't exist yet.
+
+## Architecture Selection
+
+The monitor supports pluggable architectures to study how different backbones and objectives affect gradient dynamics.
+
+### Backbones
+
+| Backbone | Description | When to Use |
+|----------|-------------|-------------|
+| **GRU** (default) | Gated recurrent unit | Baseline, production-like |
+| **SSM** | Diagonal selective state space | Research, eigenvalue analysis |
+
+**Why it matters**: GRU gating can hide/smooth write pressure. SSM linear recurrence ties write pressure more directly to eigenvalues/state dynamics. Thresholds tuned to one architecture may not generalize to another.
+
+The SSM implementation uses vectorized `cumprod`+`cumsum` operations for efficient GPU execution (supports MPS on Apple Silicon).
+
+### Objectives
+
+| Objective | Description | Attack Surface |
+|-----------|-------------|----------------|
+| **AR** (default) | Next-token prediction | Spikes loss on OOD blobs |
+| **MLM** | Masked token prediction | Can have *lower* loss on weird text |
+
+**Why it matters**: AR naturally flags garbage (high loss). MLM can make garbage *easier* to predict (lower loss), requiring different detection strategies.
+
+## Directional Monitoring
+
+Gradient magnitude isn't everything. An update can stay under norm thresholds but push the model in a harmful direction.
+
+### Canary Gradient Alignment
+
+Computes cosine similarity between:
+- **Chunk gradient**: Direction the current input wants to push weights
+- **Canary gradient**: Direction that would hurt the canary
+
+| Signal | Interpretation |
+|--------|----------------|
+| `cos > 0.3` (green) | Chunk gradient aligned with canary harm—suspicious |
+| `cos < -0.3` (red) | Chunk gradient opposes canary harm—likely benign |
+| `\|cos\| < 0.3` (grey) | Orthogonal, independent directions |
+
+### Compression Ratio
+
+Uses zlib compression as a Kolmogorov complexity proxy:
+- **Low CR (~0.3-0.5)**: High entropy, random-looking data
+- **High CR (~0.7-0.9)**: Low entropy, repetitive patterns
+
+This catches base64 blobs and repeated tokens that might evade entropy-based checks.
 
 ## Pre-Update Gate
 
@@ -83,9 +135,12 @@ ttt_ssm_eval/
 │   ├── core/
 │   │   ├── model.py          # ToyTTTModel, tokenization
 │   │   ├── gate.py           # Pre-update gate logic
-│   │   └── rollback.py       # Canary drift & rollback
+│   │   ├── rollback.py       # Canary drift & rollback
+│   │   ├── backbone.py       # GRU, SSM backbones
+│   │   └── objective.py      # AR, MLM objectives
 │   ├── monitors/
-│   │   └── gradient.py       # MonitorEvent, run_monitor()
+│   │   ├── gradient.py       # MonitorEvent, run_monitor()
+│   │   └── signals.py        # Compression ratio, gradient alignment
 │   ├── attacks/
 │   │   └── red_team.py       # Adversarial attack optimization
 │   └── ui/
@@ -122,11 +177,30 @@ python run_monitor.py --file input.txt
 cat document.txt | python run_monitor.py --stdin
 ```
 
+### Architecture Examples
+
+```bash
+# SSM backbone (study eigenvalue dynamics)
+python run_monitor.py --demo --backbone ssm
+
+# MLM objective (different attack surface)
+python run_monitor.py --demo --objective mlm --mlm_prob 0.15
+
+# Full matrix: SSM + MLM
+python run_monitor.py --demo --backbone ssm --objective mlm
+
+# Apple Silicon GPU acceleration
+python run_monitor.py --demo --backbone ssm --device mps
+
+# Fast mode (skip canary gradient computation)
+python run_monitor.py --demo --disable_canary_grad
+```
+
 ### Options
 
 | Flag | Description |
 |------|-------------|
-| `--device` | `cpu` or `cuda` |
+| `--device` | `cpu`, `cuda`, or `mps` (Apple GPU) |
 | `--chunk_tokens` | Tokens per TTT chunk (default: 128) |
 | `--lr` | TTT learning rate (default: 0.05) |
 | `--abs_grad_norm_threshold` | Absolute gradient norm flag threshold |
@@ -153,6 +227,16 @@ cat document.txt | python run_monitor.py --stdin
 | `--rollback_z_threshold` | Robust z-score threshold on canary delta (default: 6.0) |
 | `--canary_text` | Custom canary text for drift detection |
 
+### Architecture Options
+
+| Flag | Description |
+|------|-------------|
+| `--backbone` | `gru` (default) or `ssm` |
+| `--objective` | `ar` (default) or `mlm` |
+| `--mlm_prob` | MLM mask probability (default: 0.15) |
+| `--disable_canary_grad` | Skip canary gradient alignment (faster) |
+| `--canary_grad_every` | Recompute canary gradient every N chunks (default: 1) |
+
 ## Dashboard UI
 
 The TTT Sentry Dashboard provides a web-based interface for interactive monitoring and visualization.
@@ -173,8 +257,11 @@ Then open http://127.0.0.1:6677 in your browser.
 |-----------|-------------|
 | **Input Stream** | Paste or type text to analyze, with demo presets |
 | **Parameter Controls** | Adjust chunk size, entropy threshold, OOD loss threshold, rollback delta |
-| **Telemetry Chart** | Real-time visualization of gradient norm, loss, and canary delta |
-| **Event Log** | Per-chunk breakdown with gate decisions, metrics, and top tokens |
+| **Architecture Selector** | Choose backbone (GRU/SSM) and objective (AR/MLM) |
+| **Device Selector** | CPU or MPS (Apple GPU) |
+| **Canary Gradient Toggle** | Enable/disable directional monitoring |
+| **Telemetry Chart** | Real-time visualization of gradient norm, loss, canary delta, compression ratio, and cosine alignment |
+| **Event Log** | Per-chunk breakdown with gate decisions, metrics, compression ratio, gradient alignment, and top tokens |
 | **Session Stats** | Summary of chunks processed, blocked, rolled back, and max gradient |
 | **Export JSON** | Download full event log for offline analysis |
 
@@ -200,8 +287,14 @@ The repo includes an adversarial red team script that attempts to generate "Sile
 ### Running Red Team
 
 ```bash
-# CLI
+# CLI (default: GRU + AR)
 python -m ttt.attacks.red_team
+
+# Test against SSM backbone
+python -m ttt.attacks.red_team --backbone ssm
+
+# Test against MLM objective
+python -m ttt.attacks.red_team --objective mlm
 
 # Or from the dashboard UI
 # Click the "⚔️ Red Team" button
@@ -226,33 +319,50 @@ The optimizer uses Gumbel-Softmax relaxation to make discrete token selection di
 
 ### Why This Matters
 
-If the optimizer consistently finds Silent Killer payloads, the defenses need strengthening. Current weak spots:
+If the optimizer consistently finds Silent Killer payloads, the defenses need strengthening. Remaining weak spots:
 
 - **Fixed thresholds**: Attacker can optimize to stay just under
 - **No cumulative tracking**: Many small writes can add up
-- **No directional analysis**: Gradient magnitude isn't everything
+
+**Now addressed**: Canary gradient alignment provides directional analysis—we now track not just *how much* but *which direction* updates push the model.
 
 ## Output
 
 Each chunk reports:
+- Backbone and objective used (GRU/SSM, AR/MLM)
 - Loss, gradient norm, effective update norm, attempted update norm
 - Robust z-scores relative to recent history
 - Flag status with reasons
 - Gate decision (ALLOWED/BLOCKED) with reasons
 - Rollback status and canary drift metrics
 - Token entropy and diversity metrics
+- Compression ratio (Kolmogorov complexity proxy)
+- Canary gradient cosine similarity (directional alignment)
+- Canary gradient dot product (magnitude-weighted alignment)
 - Top influential tokens
 
 ## Limitations
 
-This is an educational sandbox, not a production guardrail. The toy model (embedding + GRU + adapter) is intentionally minimal to make gradient dynamics interpretable.
+This is an educational sandbox, not a production guardrail. The toy model (embedding + backbone + adapter) is intentionally minimal to make gradient dynamics interpretable. Key constraints:
+
+- **Toy scale**: 64-dim embeddings, 8K vocab—real models are 1000x larger
+- **No actual language model**: Random embeddings, no pretrained weights
+- **SSM is simplified**: Diagonal selective SSM, not full Mamba/S4/S5
+
+The SSM implementation is vectorized (`cumprod`+`cumsum`) for efficiency and supports Apple MPS GPU acceleration.
 
 ## Why This Matters
 
 Traditional transformers scale context by extending the attention window, which is O(n²) in compute and memory. TTT/SSM architectures propose a fundamentally different approach: compress context into weight updates, making "context length" a function of model expressiveness rather than sequence length.
 
-The safety question becomes: if the model learns from every input at inference time, how do you prevent it from learning things it shouldn't? This repo explores that question with gradient-based monitoring and pre-update gates.
+The safety question becomes: if the model learns from every input at inference time, how do you prevent it from learning things it shouldn't? This repo explores that question with:
+
+- **Gradient-based monitoring**: Track write pressure magnitude
+- **Directional analysis**: Canary gradient alignment catches harmful directions
+- **Pre-update gates**: Block suspicious inputs before they write
+- **Post-update rollback**: Revert updates that corrupt model behavior
+- **Architecture-agnostic design**: Same safety signals work across GRU, SSM, and future backbones
 
 ## Keywords
 
-`test-time-training` `TTT` `state-space-models` `SSM` `mamba` `context-compression` `weight-based-memory` `inference-time-learning` `gradient-monitoring` `input-safety`
+`test-time-training` `TTT` `state-space-models` `SSM` `mamba` `context-compression` `weight-based-memory` `inference-time-learning` `gradient-monitoring` `input-safety` `multi-backbone` `diagonal-ssm` `mlm` `compression-ratio` `gradient-alignment` `mps`
