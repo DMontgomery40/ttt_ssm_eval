@@ -4,6 +4,9 @@
 
 A sandbox for exploring input gradient dynamics and safety mechanisms in TTT-style architectures.
 
+[![TTT Sentry Dashboard](./dashboard_screenshot.png)](./dashboard_screenshot.png)
+*Click to expand - TTT Sentry Dashboard showing gradient monitoring, gate decisions, and canary drift detection*
+
 ## Overview
 
 Test-time training (TTT) is an emerging paradigm where model weights update during inference rather than remaining frozen. Combined with state space models (SSM), this approach offers a potential alternative to traditional transformer context windows: instead of storing context as tokens in a fixed-size window, TTT/SSM architectures compress information directly into learned neural network weights at inference time.
@@ -128,6 +131,39 @@ cat document.txt | python ttt_input_gradient_monitor.py --stdin
 | `--rollback_abs_canary_delta` | Canary loss delta threshold to trigger rollback (default: 1.0) |
 | `--rollback_z_threshold` | Robust z-score threshold on canary delta (default: 6.0) |
 | `--canary_text` | Custom canary text for drift detection |
+
+## Dashboard UI
+
+The TTT Sentry Dashboard provides a web-based interface for interactive monitoring and visualization.
+
+```bash
+# Start the dashboard
+python ttt_dashboard.py
+
+# Or with uvicorn for auto-reload during development
+uvicorn ttt_dashboard:app --reload --port 6677
+```
+
+Then open http://127.0.0.1:6677 in your browser.
+
+### Features
+
+| Component | Description |
+|-----------|-------------|
+| **Input Stream** | Paste or type text to analyze, with demo presets |
+| **Parameter Controls** | Adjust chunk size, entropy threshold, OOD loss threshold, rollback delta |
+| **Telemetry Chart** | Real-time visualization of gradient norm, loss, and canary delta |
+| **Event Log** | Per-chunk breakdown with gate decisions, metrics, and top tokens |
+| **Session Stats** | Summary of chunks processed, blocked, rolled back, and max gradient |
+| **Export JSON** | Download full event log for offline analysis |
+
+### Visual Indicators
+
+- **Green (OK)**: Update accepted, chunk learned into adapter
+- **Red (BLOCKED)**: Pre-update gate triggered, weights unchanged
+- **Orange (ROLLBACK)**: Post-update canary drift detected, weights reverted
+
+Vertical dashed lines on the chart mark blocked and rollback events for easy correlation.
 
 ## Output
 
