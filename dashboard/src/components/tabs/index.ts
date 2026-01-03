@@ -1,3 +1,4 @@
+export { SessionTreeTab } from './SessionTreeTab';
 export { OverviewTab } from './OverviewTab';
 export { WeightsTab } from './WeightsTab';
 export { TransactionsTab } from './TransactionsTab';

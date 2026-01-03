@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useDashboardStore } from '../../store';
 import { getStatusColor, getStatusLabel, formatNumber } from '../../utils/formatting';
+import { GlobalUpdateTimeline } from '../charts/GlobalUpdateTimeline';
 import type { UpdateStatus } from '../../types';
 import {
   PieChart,
@@ -21,7 +22,7 @@ type SortDir = 'asc' | 'desc';
 
 export function TransactionsTab() {
   const { currentSession, selectedUpdateEvent, setSelectedUpdateEvent } = useDashboardStore();
-  const { updateEvents, meta } = currentSession;
+  const { updateEvents, globalUpdateEvents, runs, meta } = currentSession;
 
   const [sortKey, setSortKey] = useState<SortKey>('t');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -124,6 +125,11 @@ export function TransactionsTab() {
 
   return (
     <div className="space-y-6">
+      {/* Global Update Timeline (Phase 1) */}
+      {runs && runs.length > 0 && globalUpdateEvents && (
+        <GlobalUpdateTimeline events={globalUpdateEvents} runs={runs} />
+      )}
+
       {/* Rollback Analysis */}
       <div className="grid grid-cols-2 gap-4">
         {/* Pie chart */}

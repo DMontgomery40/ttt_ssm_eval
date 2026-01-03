@@ -2,6 +2,7 @@ import { useDashboardStore } from '../../store';
 import type { TabId } from '../../types';
 
 const tabs: { id: TabId; label: string; icon: string }[] = [
+  { id: 'session-tree', label: 'Tree', icon: '🌲' },
   { id: 'overview', label: 'Overview', icon: '📊' },
   { id: 'weights', label: 'Weights', icon: '🧠' },
   { id: 'transactions', label: 'Transactions', icon: '📝' },
@@ -24,7 +25,7 @@ export function Header() {
               <span className="text-text-secondary">/</span>
               <span className="text-accent-green">SSM</span>
             </h1>
-            <p className="text-xs text-text-muted font-mono">Phase 0 Dashboard</p>
+            <p className="text-xs text-text-muted font-mono">Phase 1 Dashboard</p>
           </div>
           <div className="h-8 w-px bg-surface-200" />
           <div className="text-sm">
