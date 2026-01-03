@@ -1,7 +1,7 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { useDashboardStore } from '../../store';
-import { formatRelativeTime, truncateHash, formatImprovement } from '../../utils/formatting';
+import { truncateHash, formatImprovement } from '../../utils/formatting';
 import {
   LineChart,
   Line,
@@ -17,9 +17,96 @@ import {
 
 const SESSION_COLORS = ['#58a6ff', '#39d353', '#a371f7', '#f0883e', '#da3633'];
 
+// Fork modal component
+function ForkModal({
+  parentSessionId,
+  onClose,
+  onConfirm
+}: {
+  parentSessionId: string;
+  onClose: () => void;
+  onConfirm: (newId: string) => void;
+}) {
+  const [newSessionId, setNewSessionId] = useState(`${parentSessionId}_fork_${Date.now() % 10000}`);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      onClick={onClose}
+    >
+      <motion.div
+        initial={{ scale: 0.9, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        className="bg-surface-50 border border-surface-200 rounded-lg p-6 w-96"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-lg font-semibold text-text-primary mb-4">Fork Session</h3>
+        <p className="text-sm text-text-secondary mb-4">
+          Create a new session branched from <span className="font-mono text-accent-blue">{parentSessionId}</span>
+        </p>
+
+        <label className="block text-sm text-text-muted mb-2">New Session ID</label>
+        <input
+          type="text"
+          value={newSessionId}
+          onChange={(e) => setNewSessionId(e.target.value)}
+          className="w-full bg-surface-100 border border-surface-200 rounded px-3 py-2 font-mono text-sm mb-4"
+        />
+
+        <div className="flex gap-2 justify-end">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm bg-surface-200 hover:bg-surface-300 rounded transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              onConfirm(newSessionId);
+              onClose();
+            }}
+            className="px-4 py-2 text-sm bg-accent-blue hover:bg-accent-blue/80 text-white rounded transition-colors"
+          >
+            Create Fork
+          </button>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+}
+
 export function SessionsTab() {
-  const { sessions, currentSession, selectedSessionIds, toggleSessionSelection, setCurrentSession } =
-    useDashboardStore();
+  const {
+    sessions,
+    currentSession,
+    sessionIndex,
+    selectedSessionIds,
+    toggleSessionSelection,
+    setCurrentSession,
+    setActiveTab,
+    forkSession
+  } = useDashboardStore();
+
+  const [forkingSession, setForkingSession] = useState<string | null>(null);
+
+  // Calculate lineage depth for each session
+  const getLineageDepth = (sessionId: string): number => {
+    let depth = 0;
+    let current = sessionIndex.sessions[sessionId];
+    while (current?.parent_session_id) {
+      depth++;
+      current = sessionIndex.sessions[current.parent_session_id];
+    }
+    return depth;
+  };
+
+  // Get total runs for a session
+  const getTotalRuns = (sessionId: string): number => {
+    return sessionIndex.sessions[sessionId]?.total_runs ?? 0;
+  };
 
   // Comparison data
   const comparisonData = useMemo(() => {
@@ -44,26 +131,41 @@ export function SessionsTab() {
     const barData = selectedSessions.map((s) => ({
       session_id: s.meta.session_id,
       mu: s.meta.mu,
-      baseline: s.metrics.baseline_mse_last100_mean,
-      adaptive: s.metrics.adaptive_mse_last100_mean,
+      baseline: s.metrics.base_mse_last100_mean,
+      adaptive: s.metrics.adaptive_last100_mean,
       improvement:
-        ((s.metrics.baseline_mse_last100_mean - s.metrics.adaptive_mse_last100_mean) /
-          s.metrics.baseline_mse_last100_mean) *
+        ((s.metrics.base_mse_last100_mean - s.metrics.adaptive_last100_mean) /
+          s.metrics.base_mse_last100_mean) *
         100,
     }));
 
     return { lineData, barData, sessions: selectedSessions };
   }, [sessions, selectedSessionIds]);
 
+  // Handle fork confirmation
+  const handleForkConfirm = (newSessionId: string) => {
+    if (forkingSession) {
+      forkSession(forkingSession, newSessionId);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Session List */}
       <div className="bg-surface-50 border border-surface-200 rounded-lg">
-        <div className="p-4 border-b border-surface-200">
-          <h3 className="text-sm font-semibold text-text-primary">Available Sessions</h3>
-          <p className="text-xs text-text-muted mt-1">
-            Select 2+ sessions to compare, or click to load
-          </p>
+        <div className="p-4 border-b border-surface-200 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-text-primary">Available Sessions</h3>
+            <p className="text-xs text-text-muted mt-1">
+              Select 2+ sessions to compare, or click to load. Fork to create branches.
+            </p>
+          </div>
+          <button
+            onClick={() => setActiveTab('session-tree')}
+            className="text-xs text-accent-blue hover:underline"
+          >
+            View as Tree
+          </button>
         </div>
 
         <div className="overflow-x-auto">
@@ -87,11 +189,13 @@ export function SessionsTab() {
                   />
                 </th>
                 <th className="px-4 py-3 text-left">Session ID</th>
+                <th className="px-4 py-3 text-left">Parent</th>
+                <th className="px-4 py-3 text-center">Depth</th>
                 <th className="px-4 py-3 text-left">μ Value</th>
                 <th className="px-4 py-3 text-left">Mode</th>
+                <th className="px-4 py-3 text-center">Runs</th>
                 <th className="px-4 py-3 text-right">Commits</th>
                 <th className="px-4 py-3 text-right">Improvement</th>
-                <th className="px-4 py-3 text-left">Created</th>
                 <th className="px-4 py-3 text-center">Actions</th>
               </tr>
             </thead>
@@ -99,6 +203,8 @@ export function SessionsTab() {
               {sessions.map((session, idx) => {
                 const isSelected = selectedSessionIds.includes(session.meta.session_id);
                 const isCurrent = currentSession.meta.session_id === session.meta.session_id;
+                const depth = getLineageDepth(session.meta.session_id);
+                const totalRuns = getTotalRuns(session.meta.session_id);
 
                 return (
                   <motion.tr
@@ -120,12 +226,33 @@ export function SessionsTab() {
                       />
                     </td>
                     <td className="px-4 py-3">
-                      <span className="font-mono">{session.meta.session_id}</span>
-                      {isCurrent && (
-                        <span className="ml-2 text-xs bg-accent-blue/20 text-accent-blue px-1.5 py-0.5 rounded">
-                          current
-                        </span>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {/* Depth indicator */}
+                        {depth > 0 && (
+                          <span className="text-text-muted">{'└'.repeat(Math.min(depth, 2))}</span>
+                        )}
+                        <span className="font-mono">{session.meta.session_id}</span>
+                        {isCurrent && (
+                          <span className="text-xs bg-accent-blue/20 text-accent-blue px-1.5 py-0.5 rounded">
+                            current
+                          </span>
+                        )}
+                        {session.meta.parent_session_id === null && (
+                          <span className="text-xs bg-accent-gold/20 text-accent-gold px-1.5 py-0.5 rounded">
+                            root
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-text-muted">
+                      {session.meta.parent_session_id || 'base'}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <span className={`px-1.5 py-0.5 rounded text-xs ${
+                        depth === 0 ? 'bg-accent-gold/20 text-accent-gold' : 'bg-surface-200 text-text-muted'
+                      }`}>
+                        {depth}
+                      </span>
                     </td>
                     <td className="px-4 py-3">
                       <span className="font-mono text-accent-purple">{session.meta.mu.toFixed(4)}</span>
@@ -141,32 +268,42 @@ export function SessionsTab() {
                         {session.meta.env_mode}
                       </span>
                     </td>
+                    <td className="px-4 py-3 text-center font-mono text-accent-blue">
+                      {totalRuns || session.runs?.length || 1}
+                    </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {session.metrics.updates_committed} / {session.metrics.updates_attempted}
+                      <span className="text-accent-green">{session.metrics.updates_committed}</span>
+                      <span className="text-text-muted"> / </span>
+                      <span>{session.metrics.updates_attempted}</span>
                     </td>
                     <td className="px-4 py-3 text-right">
                       <span className="font-mono text-accent-green">
                         {formatImprovement(
-                          session.metrics.baseline_mse_last100_mean,
-                          session.metrics.adaptive_mse_last100_mean
+                          session.metrics.base_mse_last100_mean,
+                          session.metrics.adaptive_last100_mean
                         )}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-text-muted">
-                      {formatRelativeTime(session.meta.created_at_unix)}
-                    </td>
                     <td className="px-4 py-3 text-center">
-                      <button
-                        onClick={() => setCurrentSession(session)}
-                        disabled={isCurrent}
-                        className={`px-2 py-1 text-xs rounded transition-colors ${
-                          isCurrent
-                            ? 'bg-surface-200 text-text-muted cursor-not-allowed'
-                            : 'bg-accent-blue/20 text-accent-blue hover:bg-accent-blue/30'
-                        }`}
-                      >
-                        {isCurrent ? 'Loaded' : 'Load'}
-                      </button>
+                      <div className="flex items-center justify-center gap-1">
+                        <button
+                          onClick={() => setCurrentSession(session)}
+                          disabled={isCurrent}
+                          className={`px-2 py-1 text-xs rounded transition-colors ${
+                            isCurrent
+                              ? 'bg-surface-200 text-text-muted cursor-not-allowed'
+                              : 'bg-accent-blue/20 text-accent-blue hover:bg-accent-blue/30'
+                          }`}
+                        >
+                          {isCurrent ? 'Loaded' : 'Load'}
+                        </button>
+                        <button
+                          onClick={() => setForkingSession(session.meta.session_id)}
+                          className="px-2 py-1 text-xs rounded bg-surface-200 hover:bg-surface-300 text-text-secondary transition-colors"
+                        >
+                          Fork
+                        </button>
+                      </div>
                     </td>
                   </motion.tr>
                 );
@@ -175,6 +312,51 @@ export function SessionsTab() {
           </table>
         </div>
       </div>
+
+      {/* Compare with Parent */}
+      {currentSession.meta.parent_session_id && (
+        <div className="bg-surface-50 border border-surface-200 rounded-lg p-4">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-text-primary">Parent Comparison</h3>
+            <span className="text-xs text-text-muted">
+              Comparing with <span className="font-mono text-accent-blue">{currentSession.meta.parent_session_id}</span>
+            </span>
+          </div>
+
+          <div className="grid grid-cols-4 gap-4">
+            <div className="bg-surface-100 rounded-lg p-3">
+              <div className="text-xs text-text-muted mb-1">Lineage Depth</div>
+              <div className="font-mono text-lg font-bold text-accent-purple">
+                {getLineageDepth(currentSession.meta.session_id)}
+              </div>
+            </div>
+            <div className="bg-surface-100 rounded-lg p-3">
+              <div className="text-xs text-text-muted mb-1">Root Session</div>
+              <div className="font-mono text-sm text-text-primary">
+                {currentSession.meta.root_session_id}
+              </div>
+            </div>
+            <div className="bg-surface-100 rounded-lg p-3">
+              <div className="text-xs text-text-muted mb-1">Parent Session</div>
+              <div className="font-mono text-sm text-text-primary">
+                {currentSession.meta.parent_session_id}
+              </div>
+            </div>
+            <div className="bg-surface-100 rounded-lg p-3">
+              <div className="text-xs text-text-muted mb-1">Total Runs (This Branch)</div>
+              <div className="font-mono text-lg font-bold text-accent-blue">
+                {currentSession.runs?.length || 1}
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-4 p-3 bg-accent-blue/10 border border-accent-blue/30 rounded text-xs text-text-secondary">
+            <strong className="text-accent-blue">Branch Info:</strong> This session was forked from{' '}
+            <span className="font-mono">{currentSession.meta.parent_session_id}</span> and inherits its learned weights.
+            Any updates in this session build upon the parent's learning.
+          </div>
+        </div>
+      )}
 
       {/* Comparison Charts */}
       {comparisonData && (
@@ -230,7 +412,7 @@ export function SessionsTab() {
                   }}
                 />
                 <Legend />
-                <Bar dataKey="baseline" fill="#6e7681" name="Baseline MSE" />
+                <Bar dataKey="baseline" fill="#6e7681" name="Base MSE" />
                 <Bar dataKey="adaptive" fill="#39d353" name="Adaptive MSE" />
               </BarChart>
             </ResponsiveContainer>
@@ -245,7 +427,14 @@ export function SessionsTab() {
         <div className="bg-surface-100 rounded-lg p-4 font-mono text-sm">
           <p className="text-text-muted mb-2">Resume this session with:</p>
           <code className="block bg-surface rounded p-2 text-accent-blue break-all">
-            python phase0_muon.py --resume_session_dir=./runs/{currentSession.meta.session_id}/session
+            python phase0_muon.py --resume_session_dir=./artifacts/sessions/{currentSession.meta.session_id}
+          </code>
+        </div>
+
+        <div className="mt-4 bg-surface-100 rounded-lg p-4 font-mono text-sm">
+          <p className="text-text-muted mb-2">Fork this session:</p>
+          <code className="block bg-surface rounded p-2 text-accent-green break-all">
+            python phase0_muon.py --fork_from=./artifacts/sessions/{currentSession.meta.session_id} --new_session_id=my_fork
           </code>
         </div>
 
@@ -269,6 +458,15 @@ export function SessionsTab() {
           are compatible for comparison. The signature ensures identical model architecture and base weights.
         </div>
       </div>
+
+      {/* Fork modal */}
+      {forkingSession && (
+        <ForkModal
+          parentSessionId={forkingSession}
+          onClose={() => setForkingSession(null)}
+          onConfirm={handleForkConfirm}
+        />
+      )}
     </div>
   );
 }

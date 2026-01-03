@@ -28,21 +28,27 @@ export function MSEComparisonChart({
 }: MSEComparisonChartProps) {
   const { logScale, smoothing, smoothingWindow, setSelectedUpdateEvent } = useDashboardStore();
 
-  // Prepare data
+  // Prepare data with three lines
   const chartData = useMemo(() => {
-    let baselineValues = perStep.map((s) => s.baseline_mse);
+    let baseValues = perStep.map((s) => s.base_mse);
+    let sessionStartValues = perStep.map((s) => s.session_start_mse);
     let adaptiveValues = perStep.map((s) => s.adaptive_mse);
 
     if (smoothing) {
-      baselineValues = smoothData(baselineValues, smoothingWindow);
+      baseValues = smoothData(baseValues, smoothingWindow);
+      sessionStartValues = smoothData(sessionStartValues, smoothingWindow);
       adaptiveValues = smoothData(adaptiveValues, smoothingWindow);
     }
 
     return perStep.map((step, i) => ({
       t: step.t,
-      baseline: baselineValues[i],
+      base: baseValues[i],
+      sessionStart: sessionStartValues[i],
       adaptive: adaptiveValues[i],
-      gap: baselineValues[i] - adaptiveValues[i],
+      // Gap between session start and adaptive (online learning region)
+      onlineGap: Math.max(0, sessionStartValues[i] - adaptiveValues[i]),
+      // Gap between base and session start (persistent learning region)
+      persistentGap: Math.max(0, baseValues[i] - sessionStartValues[i]),
       isUpdate: step.did_update,
       updateOk: step.update_ok,
     }));
@@ -75,17 +81,27 @@ export function MSEComparisonChart({
         <div className="space-y-1 text-sm">
           <div className="flex items-center gap-2">
             <div className="w-3 h-3 rounded-full bg-text-muted" />
-            <span className="text-text-secondary">Baseline:</span>
-            <span className="font-mono text-text-primary">{formatNumber(data?.baseline)}</span>
+            <span className="text-text-secondary">Base:</span>
+            <span className="font-mono text-text-primary">{formatNumber(data?.base)}</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full bg-accent-cyan" />
-            <span className="text-text-secondary">Adaptive:</span>
-            <span className="font-mono text-accent-cyan">{formatNumber(data?.adaptive)}</span>
+            <div className="w-3 h-3 rounded-full bg-accent-blue" />
+            <span className="text-text-secondary">Session Start:</span>
+            <span className="font-mono text-accent-blue">{formatNumber(data?.sessionStart)}</span>
           </div>
-          {data?.gap > 0 && (
+          <div className="flex items-center gap-2">
+            <div className="w-3 h-3 rounded-full bg-accent-green" />
+            <span className="text-text-secondary">Adaptive:</span>
+            <span className="font-mono text-accent-green">{formatNumber(data?.adaptive)}</span>
+          </div>
+          {data?.persistentGap > 0.0001 && (
+            <div className="text-xs text-accent-blue mt-1">
+              Persistent gap: {formatNumber(data.persistentGap)}
+            </div>
+          )}
+          {data?.onlineGap > 0.0001 && (
             <div className="text-xs text-accent-green mt-1">
-              Learning gap: {formatNumber(data.gap)}
+              Online gap: {formatNumber(data.onlineGap)}
             </div>
           )}
         </div>
@@ -104,7 +120,7 @@ export function MSEComparisonChart({
   return (
     <div className="bg-surface-50 border border-surface-200 rounded-lg p-4">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-text-primary">MSE Comparison</h3>
+        <h3 className="text-sm font-semibold text-text-primary">MSE Comparison (Three-Way)</h3>
         <div className="flex items-center gap-4 text-xs">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
@@ -130,7 +146,13 @@ export function MSEComparisonChart({
       <ResponsiveContainer width="100%" height={height}>
         <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: 10, bottom: 10 }}>
           <defs>
-            <linearGradient id="gapGradient" x1="0" y1="0" x2="0" y2="1">
+            {/* Persistent learning region fill (base to session start) */}
+            <linearGradient id="persistentGradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#58a6ff" stopOpacity={0.2} />
+              <stop offset="95%" stopColor="#58a6ff" stopOpacity={0} />
+            </linearGradient>
+            {/* Online learning region fill (session start to adaptive) */}
+            <linearGradient id="onlineGradient" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="#39d353" stopOpacity={0.3} />
               <stop offset="95%" stopColor="#39d353" stopOpacity={0} />
             </linearGradient>
@@ -156,25 +178,37 @@ export function MSEComparisonChart({
 
           <Tooltip content={<CustomTooltip />} />
 
-          {/* Learning gap area */}
+          {/* Online learning gap area (session start to adaptive) */}
           <Area
             type="monotone"
-            dataKey="gap"
-            fill="url(#gapGradient)"
+            dataKey="onlineGap"
+            fill="url(#onlineGradient)"
             stroke="none"
           />
 
-          {/* Baseline line */}
+          {/* Base line - gray, dashed, thin */}
           <Line
             type="monotone"
-            dataKey="baseline"
+            dataKey="base"
             stroke="#6e7681"
-            strokeWidth={2}
+            strokeWidth={1.5}
+            strokeDasharray="5 5"
             dot={false}
-            name="Baseline"
+            name="Base"
           />
 
-          {/* Adaptive line with glow effect */}
+          {/* Session start line - blue, dashed, medium */}
+          <Line
+            type="monotone"
+            dataKey="sessionStart"
+            stroke="#58a6ff"
+            strokeWidth={2}
+            strokeDasharray="5 5"
+            dot={false}
+            name="Session Start"
+          />
+
+          {/* Adaptive line - green, solid, thick with glow */}
           <Line
             type="monotone"
             dataKey="adaptive"
@@ -249,11 +283,15 @@ export function MSEComparisonChart({
       {/* Legend */}
       <div className="flex items-center justify-center gap-6 mt-4 text-xs">
         <div className="flex items-center gap-2">
-          <div className="w-4 h-0.5 bg-text-muted" />
-          <span className="text-text-muted">Baseline (frozen)</span>
+          <div className="w-4 h-0.5 bg-text-muted" style={{ borderTop: '1.5px dashed #6e7681' }} />
+          <span className="text-text-muted">Base (frozen)</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="w-4 h-0.5 bg-accent-cyan" style={{ boxShadow: '0 0 4px rgba(57, 211, 83, 0.5)' }} />
+          <div className="w-4 h-0.5 bg-accent-blue" style={{ borderTop: '2px dashed #58a6ff' }} />
+          <span className="text-text-secondary">Session Start</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-1 bg-accent-green rounded" style={{ boxShadow: '0 0 4px rgba(57, 211, 83, 0.5)' }} />
           <span className="text-text-secondary">Adaptive (TTT)</span>
         </div>
         <div className="flex items-center gap-2">

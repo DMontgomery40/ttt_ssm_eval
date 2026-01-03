@@ -6,21 +6,32 @@ import type {
   SessionMetrics,
   PlasticWeights,
   TrajectoryPoint,
-  UpdateStatus
+  UpdateStatus,
+  RunData,
+  GlobalUpdateEvent,
+  SessionIndex,
+  SessionSummary,
+  SessionTreeNode
 } from '../types';
 
 // Generate realistic mock data for development
-function generatePerStepMetrics(steps: number, chunk: number): PerStepMetric[] {
+
+function generatePerStepMetrics(steps: number, chunk: number, sessionImprovement: number = 0): PerStepMetric[] {
   const metrics: PerStepMetric[] = [];
-  let baselineBase = 0.08;
-  let adaptiveBase = 0.08;
+  let baseBase = 0.08;
+  let sessionStartBase = 0.08 * (1 - sessionImprovement);  // Session start is better than base
+  let adaptiveBase = sessionStartBase;
 
   for (let t = 0; t < steps; t++) {
-    // Baseline stays relatively constant with small noise
-    const baselineNoise = (Math.random() - 0.5) * 0.02;
-    const baseline_mse = Math.max(0.001, baselineBase + baselineNoise + Math.sin(t * 0.02) * 0.01);
+    // Base stays constant with small noise (pretrained frozen weights)
+    const baseNoise = (Math.random() - 0.5) * 0.02;
+    const base_mse = Math.max(0.001, baseBase + baseNoise + Math.sin(t * 0.02) * 0.01);
 
-    // Adaptive improves over time as it learns
+    // Session start (no updates this run) stays relatively constant
+    const sessionNoise = (Math.random() - 0.5) * 0.015;
+    const session_start_mse = Math.max(0.0008, sessionStartBase + sessionNoise + Math.sin(t * 0.02) * 0.008);
+
+    // Adaptive improves over time as it learns (online updates)
     const learningFactor = Math.exp(-t / 200);
     const adaptiveNoise = (Math.random() - 0.5) * 0.01;
     const adaptive_mse = Math.max(0.0005, adaptiveBase * learningFactor * 0.3 + adaptiveNoise + 0.002);
@@ -30,8 +41,10 @@ function generatePerStepMetrics(steps: number, chunk: number): PerStepMetric[] {
 
     metrics.push({
       t,
-      baseline_mse,
+      base_mse,
+      session_start_mse,
       adaptive_mse,
+      baseline_mse: base_mse,  // Legacy alias
       did_update,
       update_ok
     });
@@ -49,7 +62,7 @@ function generateUpdateEvents(perStep: PerStepMetric[], _chunk: number): UpdateE
         ? 'commit'
         : (Math.random() > 0.5 ? 'rollback_loss_regression' : 'rollback_grad_norm');
 
-      const pre_loss = step.baseline_mse * (0.8 + Math.random() * 0.4);
+      const pre_loss = step.base_mse * (0.8 + Math.random() * 0.4);
       const post_loss = step.update_ok
         ? pre_loss * (0.6 + Math.random() * 0.3)
         : pre_loss * (1.3 + Math.random() * 0.3);
@@ -66,6 +79,19 @@ function generateUpdateEvents(perStep: PerStepMetric[], _chunk: number): UpdateE
     }
   }
 
+  return events;
+}
+
+function generateGlobalUpdateEvents(runs: RunData[]): GlobalUpdateEvent[] {
+  const events: GlobalUpdateEvent[] = [];
+  for (const run of runs) {
+    for (const event of run.updateEvents) {
+      events.push({
+        ...event,
+        run_id: run.run_id
+      });
+    }
+  }
   return events;
 }
 
@@ -104,30 +130,110 @@ function generateTrajectory(steps: number, mu: number): TrajectoryPoint[] {
   return trajectory;
 }
 
+function generateRun(options: {
+  sessionId: string;
+  mu: number;
+  envMode: 'linear' | 'nonlinear';
+  steps?: number;
+  seed?: number;
+  daysAgo?: number;
+  sessionImprovement?: number;
+}): RunData {
+  const steps = options.steps ?? 600;
+  const seed = options.seed ?? Math.floor(Math.random() * 10000);
+  const chunk = 32;
+  const daysAgo = options.daysAgo ?? 0;
+  const sessionImprovement = options.sessionImprovement ?? 0;
+
+  const perStep = generatePerStepMetrics(steps, chunk, sessionImprovement);
+  const updateEvents = generateUpdateEvents(perStep, chunk);
+  const trajectory = generateTrajectory(steps, options.mu);
+
+  const baseLast100 = perStep.slice(-100);
+  const run_id = `run_${Date.now() - daysAgo * 86400000}`;
+
+  const metrics: SessionMetrics = {
+    run_id,
+    seed,
+    steps,
+    mu: options.mu,
+    env_mode: options.envMode,
+    // Three-way metrics
+    base_mse_mean: perStep.reduce((sum, s) => sum + s.base_mse, 0) / perStep.length,
+    base_mse_last100_mean: baseLast100.reduce((sum, s) => sum + s.base_mse, 0) / 100,
+    session_no_update_mse_mean: perStep.reduce((sum, s) => sum + s.session_start_mse, 0) / perStep.length,
+    session_no_update_last100_mean: baseLast100.reduce((sum, s) => sum + s.session_start_mse, 0) / 100,
+    adaptive_mse_mean: perStep.reduce((sum, s) => sum + s.adaptive_mse, 0) / perStep.length,
+    adaptive_last100_mean: baseLast100.reduce((sum, s) => sum + s.adaptive_mse, 0) / 100,
+    updates_attempted: updateEvents.length,
+    updates_committed: updateEvents.filter(e => e.status === 'commit').length,
+    updates_rolled_back: updateEvents.filter(e => e.status !== 'commit').length,
+    // Legacy aliases
+    baseline_mse_mean: perStep.reduce((sum, s) => sum + s.base_mse, 0) / perStep.length,
+    baseline_mse_last100_mean: baseLast100.reduce((sum, s) => sum + s.base_mse, 0) / 100,
+    adaptive_mse_last100_mean: baseLast100.reduce((sum, s) => sum + s.adaptive_mse, 0) / 100
+  };
+
+  return {
+    run_id,
+    created_at_unix: Math.floor(Date.now() / 1000) - daysAgo * 86400,
+    seed,
+    steps,
+    metrics,
+    perStep,
+    updateEvents,
+    trajectory
+  };
+}
+
 export function generateMockSession(options?: {
   steps?: number;
   mu?: number;
   envMode?: 'linear' | 'nonlinear';
   sessionId?: string;
+  parentSessionId?: string | null;
+  rootSessionId?: string;
+  numRuns?: number;
+  sessionImprovement?: number;  // How much better than base (0-1)
 }): SessionData {
   const steps = options?.steps ?? 600;
   const mu = options?.mu ?? 0.12 + Math.random() * 0.1;
   const envMode = options?.envMode ?? 'linear';
   const sessionId = options?.sessionId ?? 'session_001';
+  const parentSessionId = options?.parentSessionId ?? null;
+  const rootSessionId = options?.rootSessionId ?? sessionId;
+  const numRuns = options?.numRuns ?? 3;
+  const sessionImprovement = options?.sessionImprovement ?? 0.3;
   const chunk = 32;
 
-  const perStep = generatePerStepMetrics(steps, chunk);
-  const updateEvents = generateUpdateEvents(perStep, chunk);
-  const weights = generateWeights();
-  const trajectory = generateTrajectory(steps, mu);
+  // Generate multiple runs for the session
+  const runs: RunData[] = [];
+  for (let i = 0; i < numRuns; i++) {
+    runs.push(generateRun({
+      sessionId,
+      mu,
+      envMode,
+      steps,
+      seed: 1337 + i,
+      daysAgo: numRuns - 1 - i,  // Older runs first
+      sessionImprovement: sessionImprovement * (i / (numRuns - 1 || 1))  // Progressive improvement
+    }));
+  }
 
-  const baselineLast100 = perStep.slice(-100);
-  const adaptiveLast100 = perStep.slice(-100);
+  // Current run is the latest
+  const currentRun = runs[runs.length - 1];
+  const globalUpdateEvents = generateGlobalUpdateEvents(runs);
+  const weights = generateWeights();
+  const parentWeights = parentSessionId ? generateWeights() : undefined;
+  const baseWeights = generateWeights();
 
   const meta: SessionMeta = {
     schema_version: 1,
     session_id: sessionId,
-    created_at_unix: Math.floor(Date.now() / 1000) - 3600,
+    parent_session_id: parentSessionId,
+    root_session_id: rootSessionId,
+    created_at_unix: Math.floor(Date.now() / 1000) - 86400 * numRuns,
+    last_run_at_unix: currentRun.created_at_unix,
     torch_version: '2.1.0',
     env_mode: envMode,
     mu,
@@ -156,32 +262,250 @@ export function generateMockSession(options?: {
     }
   };
 
-  const metrics: SessionMetrics = {
-    baseline_mse_mean: perStep.reduce((sum, s) => sum + s.baseline_mse, 0) / perStep.length,
-    adaptive_mse_mean: perStep.reduce((sum, s) => sum + s.adaptive_mse, 0) / perStep.length,
-    baseline_mse_last100_mean: baselineLast100.reduce((sum, s) => sum + s.baseline_mse, 0) / 100,
-    adaptive_mse_last100_mean: adaptiveLast100.reduce((sum, s) => sum + s.adaptive_mse, 0) / 100,
-    updates_attempted: updateEvents.length,
-    updates_committed: updateEvents.filter(e => e.status === 'commit').length,
-    updates_rolled_back: updateEvents.filter(e => e.status !== 'commit').length
-  };
-
   return {
     meta,
-    metrics,
-    perStep,
-    updateEvents,
+    metrics: currentRun.metrics,
+    perStep: currentRun.perStep,
+    updateEvents: currentRun.updateEvents,
+    globalUpdateEvents,
+    runs,
     weights,
-    trajectory
+    parentWeights,
+    baseWeights,
+    trajectory: currentRun.trajectory
   };
 }
 
+// Phase 1: Generate mock session hierarchy
+export function generateMockSessionIndex(): SessionIndex {
+  const sessions: Record<string, SessionSummary> = {};
+
+  // Root session
+  sessions['session_001'] = {
+    session_id: 'session_001',
+    parent_session_id: null,
+    root_session_id: 'session_001',
+    created_at_unix: Math.floor(Date.now() / 1000) - 86400 * 7,
+    last_run_at_unix: Math.floor(Date.now() / 1000) - 86400 * 2,
+    env_mode: 'linear',
+    mu: 0.12,
+    model_signature: 'f9e8d7c6b5a43210',
+    total_runs: 5,
+    total_updates_committed: 75,
+    total_updates_rolled_back: 12
+  };
+
+  // Fork A from session_001
+  sessions['session_001_fork_a'] = {
+    session_id: 'session_001_fork_a',
+    parent_session_id: 'session_001',
+    root_session_id: 'session_001',
+    created_at_unix: Math.floor(Date.now() / 1000) - 86400 * 5,
+    last_run_at_unix: Math.floor(Date.now() / 1000) - 86400 * 1,
+    env_mode: 'linear',
+    mu: 0.12,
+    model_signature: 'f9e8d7c6b5a43210',
+    total_runs: 3,
+    total_updates_committed: 42,
+    total_updates_rolled_back: 8
+  };
+
+  // Fork B from session_001 (different env mode)
+  sessions['session_001_fork_b'] = {
+    session_id: 'session_001_fork_b',
+    parent_session_id: 'session_001',
+    root_session_id: 'session_001',
+    created_at_unix: Math.floor(Date.now() / 1000) - 86400 * 4,
+    last_run_at_unix: Math.floor(Date.now() / 1000) - 3600,
+    env_mode: 'nonlinear',
+    mu: 0.12,
+    model_signature: 'f9e8d7c6b5a43210',
+    total_runs: 4,
+    total_updates_committed: 58,
+    total_updates_rolled_back: 10
+  };
+
+  // Sub-fork from fork_a
+  sessions['session_001_fork_a_v2'] = {
+    session_id: 'session_001_fork_a_v2',
+    parent_session_id: 'session_001_fork_a',
+    root_session_id: 'session_001',
+    created_at_unix: Math.floor(Date.now() / 1000) - 86400 * 2,
+    last_run_at_unix: Math.floor(Date.now() / 1000) - 1800,
+    env_mode: 'linear',
+    mu: 0.12,
+    model_signature: 'f9e8d7c6b5a43210',
+    total_runs: 2,
+    total_updates_committed: 28,
+    total_updates_rolled_back: 5
+  };
+
+  // Independent session with different mu
+  sessions['session_002'] = {
+    session_id: 'session_002',
+    parent_session_id: null,
+    root_session_id: 'session_002',
+    created_at_unix: Math.floor(Date.now() / 1000) - 86400 * 3,
+    last_run_at_unix: Math.floor(Date.now() / 1000) - 86400,
+    env_mode: 'linear',
+    mu: 0.18,
+    model_signature: 'f9e8d7c6b5a43210',
+    total_runs: 2,
+    total_updates_committed: 32,
+    total_updates_rolled_back: 6
+  };
+
+  // Fork from session_002
+  sessions['session_002_high_mu'] = {
+    session_id: 'session_002_high_mu',
+    parent_session_id: 'session_002',
+    root_session_id: 'session_002',
+    created_at_unix: Math.floor(Date.now() / 1000) - 86400 * 1,
+    last_run_at_unix: Math.floor(Date.now() / 1000) - 7200,
+    env_mode: 'nonlinear',
+    mu: 0.22,
+    model_signature: 'f9e8d7c6b5a43210',
+    total_runs: 1,
+    total_updates_committed: 15,
+    total_updates_rolled_back: 3
+  };
+
+  return {
+    schema_version: 1,
+    sessions
+  };
+}
+
+// Build session tree from index
+export function buildSessionTree(index: SessionIndex): SessionTreeNode[] {
+  const roots: SessionTreeNode[] = [];
+  const nodeMap = new Map<string, SessionTreeNode>();
+
+  // Create nodes for all sessions
+  for (const session of Object.values(index.sessions)) {
+    nodeMap.set(session.session_id, {
+      session,
+      children: [],
+      depth: 0
+    });
+  }
+
+  // Build tree structure
+  for (const session of Object.values(index.sessions)) {
+    const node = nodeMap.get(session.session_id)!;
+    if (session.parent_session_id === null) {
+      roots.push(node);
+    } else {
+      const parent = nodeMap.get(session.parent_session_id);
+      if (parent) {
+        parent.children.push(node);
+      } else {
+        // Orphaned node, treat as root
+        roots.push(node);
+      }
+    }
+  }
+
+  // Calculate depths
+  function setDepths(node: SessionTreeNode, depth: number) {
+    node.depth = depth;
+    for (const child of node.children) {
+      setDepths(child, depth + 1);
+    }
+  }
+
+  for (const root of roots) {
+    setDepths(root, 0);
+  }
+
+  return roots;
+}
+
+// Get lineage path from root to session
+export function getSessionLineage(sessionId: string, index: SessionIndex): string[] {
+  const lineage: string[] = [];
+  let current = index.sessions[sessionId];
+
+  while (current) {
+    lineage.unshift(current.session_id);
+    if (current.parent_session_id) {
+      current = index.sessions[current.parent_session_id];
+    } else {
+      break;
+    }
+  }
+
+  return lineage;
+}
+
 // Pre-generated mock data for immediate use
-export const mockSession = generateMockSession();
+export const mockSessionIndex = generateMockSessionIndex();
+export const mockSessionTree = buildSessionTree(mockSessionIndex);
+
+export const mockSession = generateMockSession({
+  sessionId: 'session_001_fork_a_v2',
+  parentSessionId: 'session_001_fork_a',
+  rootSessionId: 'session_001',
+  mu: 0.12,
+  envMode: 'linear',
+  numRuns: 3,
+  sessionImprovement: 0.4
+});
 
 // Multiple sessions for comparison
 export const mockSessions: SessionData[] = [
-  generateMockSession({ sessionId: 'session_001', mu: 0.08, envMode: 'linear' }),
-  generateMockSession({ sessionId: 'session_002', mu: 0.15, envMode: 'linear' }),
-  generateMockSession({ sessionId: 'session_003', mu: 0.22, envMode: 'nonlinear' }),
+  generateMockSession({
+    sessionId: 'session_001',
+    parentSessionId: null,
+    rootSessionId: 'session_001',
+    mu: 0.12,
+    envMode: 'linear',
+    numRuns: 5,
+    sessionImprovement: 0.2
+  }),
+  generateMockSession({
+    sessionId: 'session_001_fork_a',
+    parentSessionId: 'session_001',
+    rootSessionId: 'session_001',
+    mu: 0.12,
+    envMode: 'linear',
+    numRuns: 3,
+    sessionImprovement: 0.35
+  }),
+  generateMockSession({
+    sessionId: 'session_001_fork_b',
+    parentSessionId: 'session_001',
+    rootSessionId: 'session_001',
+    mu: 0.12,
+    envMode: 'nonlinear',
+    numRuns: 4,
+    sessionImprovement: 0.3
+  }),
+  generateMockSession({
+    sessionId: 'session_001_fork_a_v2',
+    parentSessionId: 'session_001_fork_a',
+    rootSessionId: 'session_001',
+    mu: 0.12,
+    envMode: 'linear',
+    numRuns: 2,
+    sessionImprovement: 0.45
+  }),
+  generateMockSession({
+    sessionId: 'session_002',
+    parentSessionId: null,
+    rootSessionId: 'session_002',
+    mu: 0.18,
+    envMode: 'linear',
+    numRuns: 2,
+    sessionImprovement: 0.25
+  }),
+  generateMockSession({
+    sessionId: 'session_002_high_mu',
+    parentSessionId: 'session_002',
+    rootSessionId: 'session_002',
+    mu: 0.22,
+    envMode: 'nonlinear',
+    numRuns: 1,
+    sessionImprovement: 0.15
+  }),
 ];

@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
+import { motion } from 'framer-motion';
 import { useDashboardStore } from '../../store';
 import { WeightHeatmap } from '../charts/WeightHeatmap';
+import { WeightDiffHeatmap } from '../charts/WeightDiffHeatmap';
 import {
   BarChart,
   Bar,
@@ -12,8 +14,8 @@ import {
 } from 'recharts';
 
 export function WeightsTab() {
-  const { currentSession } = useDashboardStore();
-  const { weights, meta } = currentSession;
+  const { currentSession, weightCompareMode, setWeightCompareMode } = useDashboardStore();
+  const { weights, parentWeights, baseWeights, meta } = currentSession;
 
   if (!weights) {
     return (
@@ -25,7 +27,6 @@ export function WeightsTab() {
 
   // Compute singular values (simple approximation for visualization)
   const computeSVD = (matrix: number[][]) => {
-    // For a proper SVD we'd need a library, but for visualization we'll compute column norms
     const cols = matrix[0]?.length ?? 0;
     const svs: number[] = [];
 
@@ -38,6 +39,16 @@ export function WeightsTab() {
     }
 
     return svs.sort((a, b) => b - a).slice(0, 10);
+  };
+
+  // Compute weight difference
+  const computeDiff = (current: number[][], reference: number[][] | undefined): number[][] | null => {
+    if (!reference) return null;
+    if (current.length !== reference.length || current[0]?.length !== reference[0]?.length) return null;
+
+    return current.map((row, i) =>
+      row.map((val, j) => val - reference[i][j])
+    );
   };
 
   const wuSVs = useMemo(() => computeSVD(weights.W_u), [weights.W_u]);
@@ -62,26 +73,189 @@ export function WeightsTab() {
   const totalPlastic = paramCounts.filter(p => p.plastic).reduce((a, b) => a + b.count, 0);
   const totalFrozen = paramCounts.filter(p => !p.plastic).reduce((a, b) => a + b.count, 0);
 
+  // Determine what weights to compare against
+  const referenceWeights = weightCompareMode === 'parent' ? parentWeights :
+                           weightCompareMode === 'base' ? baseWeights : null;
+  const referenceLabel = weightCompareMode === 'parent' ? 'Parent Session' :
+                         weightCompareMode === 'base' ? 'Base Checkpoint' : null;
+
+  // Compute diffs if in comparison mode
+  const wuDiff = useMemo(() => computeDiff(weights.W_u, referenceWeights?.W_u), [weights.W_u, referenceWeights]);
+  const bDiff = useMemo(() => computeDiff(weights.B, referenceWeights?.B), [weights.B, referenceWeights]);
+  const woDiff = useMemo(() => computeDiff(weights.W_o, referenceWeights?.W_o), [weights.W_o, referenceWeights]);
+
+  // Compute drift metrics
+  const computeDriftMetrics = (diff: number[][] | null) => {
+    if (!diff) return null;
+    const flat = diff.flat();
+    const maxAbs = Math.max(...flat.map(Math.abs));
+    const l2 = Math.sqrt(flat.reduce((sum, v) => sum + v * v, 0));
+    const meanAbs = flat.reduce((sum, v) => sum + Math.abs(v), 0) / flat.length;
+    return { maxAbs, l2, meanAbs };
+  };
+
+  const driftMetrics = {
+    W_u: computeDriftMetrics(wuDiff),
+    B: computeDriftMetrics(bDiff),
+    W_o: computeDriftMetrics(woDiff),
+  };
+
   return (
     <div className="space-y-6">
-      {/* Weight Matrix Heatmaps */}
-      <div className="grid grid-cols-3 gap-4">
-        <WeightHeatmap
-          name="W_u"
-          data={weights.W_u}
-          description="Input projection"
-        />
-        <WeightHeatmap
-          name="B"
-          data={weights.B}
-          description="State update"
-        />
-        <WeightHeatmap
-          name="W_o"
-          data={weights.W_o}
-          description="Output projection"
-        />
+      {/* Comparison Mode Toggle */}
+      <div className="bg-surface-50 border border-surface-200 rounded-lg p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-text-primary">Weight Comparison Mode</h3>
+            <p className="text-xs text-text-muted mt-1">
+              Compare current weights against parent session or base checkpoint
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setWeightCompareMode('none')}
+              className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+                weightCompareMode === 'none'
+                  ? 'bg-accent-blue text-white'
+                  : 'bg-surface-200 text-text-secondary hover:bg-surface-300'
+              }`}
+            >
+              Current Only
+            </button>
+            <button
+              onClick={() => setWeightCompareMode('parent')}
+              disabled={!parentWeights}
+              className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+                weightCompareMode === 'parent'
+                  ? 'bg-accent-purple text-white'
+                  : 'bg-surface-200 text-text-secondary hover:bg-surface-300'
+              } ${!parentWeights ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              vs Parent
+            </button>
+            <button
+              onClick={() => setWeightCompareMode('base')}
+              disabled={!baseWeights}
+              className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+                weightCompareMode === 'base'
+                  ? 'bg-accent-gold text-white'
+                  : 'bg-surface-200 text-text-secondary hover:bg-surface-300'
+              } ${!baseWeights ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              vs Base
+            </button>
+          </div>
+        </div>
+
+        {/* Drift summary when in comparison mode */}
+        {weightCompareMode !== 'none' && referenceWeights && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            className="mt-4 pt-4 border-t border-surface-200"
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <span className="text-sm text-text-primary font-medium">
+                Weight Drift from {referenceLabel}
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              {Object.entries(driftMetrics).map(([name, metrics]) => (
+                <div key={name} className="bg-surface-100 rounded-lg p-3">
+                  <div className="font-mono text-sm mb-2">{name}</div>
+                  {metrics ? (
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div>
+                        <span className="text-text-muted block">Max |δ|</span>
+                        <span className="font-mono text-accent-red">{metrics.maxAbs.toFixed(4)}</span>
+                      </div>
+                      <div>
+                        <span className="text-text-muted block">L2 Drift</span>
+                        <span className="font-mono text-accent-purple">{metrics.l2.toFixed(4)}</span>
+                      </div>
+                      <div>
+                        <span className="text-text-muted block">Mean |δ|</span>
+                        <span className="font-mono text-accent-blue">{metrics.meanAbs.toFixed(4)}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-text-muted">N/A</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
       </div>
+
+      {/* Weight Matrix Heatmaps */}
+      {weightCompareMode === 'none' ? (
+        <div className="grid grid-cols-3 gap-4">
+          <WeightHeatmap
+            name="W_u"
+            data={weights.W_u}
+            description="Input projection"
+          />
+          <WeightHeatmap
+            name="B"
+            data={weights.B}
+            description="State update"
+          />
+          <WeightHeatmap
+            name="W_o"
+            data={weights.W_o}
+            description="Output projection"
+          />
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="grid grid-cols-3 gap-4">
+            {wuDiff && (
+              <WeightDiffHeatmap
+                name="W_u Δ"
+                data={wuDiff}
+                description={`Diff from ${referenceLabel}`}
+              />
+            )}
+            {bDiff && (
+              <WeightDiffHeatmap
+                name="B Δ"
+                data={bDiff}
+                description={`Diff from ${referenceLabel}`}
+              />
+            )}
+            {woDiff && (
+              <WeightDiffHeatmap
+                name="W_o Δ"
+                data={woDiff}
+                description={`Diff from ${referenceLabel}`}
+              />
+            )}
+          </div>
+
+          {/* Current weights for reference */}
+          <div className="bg-surface-50 border border-surface-200 rounded-lg p-4">
+            <h3 className="text-sm font-semibold text-text-primary mb-4">Current Weights (Reference)</h3>
+            <div className="grid grid-cols-3 gap-4">
+              <WeightHeatmap
+                name="W_u"
+                data={weights.W_u}
+                description="Input projection"
+              />
+              <WeightHeatmap
+                name="B"
+                data={weights.B}
+                description="State update"
+              />
+              <WeightHeatmap
+                name="W_o"
+                data={weights.W_o}
+                description="Output projection"
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Spectral View */}
       <div className="bg-surface-50 border border-surface-200 rounded-lg p-4">
@@ -149,6 +323,16 @@ export function WeightsTab() {
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Learning insight */}
+      <div className="bg-accent-blue/10 border border-accent-blue/30 rounded-lg p-4">
+        <p className="text-sm text-text-primary">
+          <strong className="text-accent-blue">Phase 1 Insight:</strong> Use the comparison modes above to see
+          how much the weights have drifted from the parent session (what this fork learned) or from the base
+          checkpoint (what the entire lineage has learned). Large drifts in specific regions indicate where the
+          model adapted most to the physics environment.
+        </p>
       </div>
     </div>
   );

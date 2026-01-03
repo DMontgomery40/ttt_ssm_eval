@@ -1,6 +1,7 @@
 import { useDashboardStore } from './store';
 import { Header } from './components/layout/Header';
 import {
+  SessionTreeTab,
   OverviewTab,
   WeightsTab,
   TransactionsTab,
@@ -27,6 +28,7 @@ function App() {
             transition={{ duration: 0.15 }}
             className="tab-content"
           >
+            {activeTab === 'session-tree' && <SessionTreeTab />}
             {activeTab === 'overview' && <OverviewTab />}
             {activeTab === 'weights' && <WeightsTab />}
             {activeTab === 'transactions' && <TransactionsTab />}
@@ -40,7 +42,7 @@ function App() {
       {/* Footer */}
       <footer className="border-t border-surface-200 px-6 py-3 flex items-center justify-between text-xs text-text-muted">
         <div className="flex items-center gap-4">
-          <span>TTT-SSM Phase 0 Dashboard</span>
+          <span>TTT-SSM Phase 1 Dashboard</span>
           <span className="text-surface-300">|</span>
           <span>Test-Time Training Research Tool</span>
         </div>
